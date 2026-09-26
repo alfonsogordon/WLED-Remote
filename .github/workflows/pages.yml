@@ -2,13 +2,6 @@ name: Build web installer
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "web-installer/**"
-      - "src/**"
-      - "platformio.ini"
-      - ".github/workflows/pages.yml"
 
 permissions:
   contents: read
