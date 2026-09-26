@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <M5Unified.h>
 #include <WiFi.h>
+#include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <ESPmDNS.h>
 #include <ArduinoJson.h>
@@ -12,190 +13,224 @@
 struct WledDevice {
   String name;
   IPAddress ip;
-  bool online = false;
-  bool on = false;
-  uint8_t brightness = 0;
+  bool online=false, on=false;
+  uint8_t brightness=0;
+  int timerMinutes=0;
 };
 
-static constexpr size_t MAX_DEVICES = 16;
+enum class Screen { HOME, DEVICE, TIMER, ALL };
+static constexpr size_t MAX_DEVICES=16;
 WledDevice devices[MAX_DEVICES];
-size_t deviceCount = 0;
-size_t selected = 0;
-unsigned long lastRefresh = 0;
+size_t deviceCount=0, selected=0;
+int menuIndex=0;
+Screen screen=Screen::HOME;
+unsigned long lastRefresh=0, animTick=0;
+uint16_t hue=0;
 
-void drawHeader(const char* subtitle) {
-  M5.Display.fillScreen(TFT_BLACK);
-  M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+const char* actions[]={"POWER","WHITE","DEFAULT","BRIGHT +","BRIGHT -","SLEEP TIMER","BACK"};
+const int ACTION_COUNT=7;
+const int timers[]={30,60,120,180,0};
+const char* timerLabels[]={"30 MIN","1 HOUR","2 HOURS","3 HOURS","CANCEL"};
+
+uint16_t rainbow565(uint8_t phase){
+  uint8_t r=0,g=0,b=0, p=phase%192;
+  if(p<64){r=255-p*4;g=p*4;b=40;}
+  else if(p<128){p-=64;r=30;g=255-p*4;b=p*4;}
+  else {p-=128;r=p*4;g=30;b=255-p*4;}
+  return M5.Display.color565(r,g,b);
+}
+
+void backdrop(){
+  for(int y=0;y<135;y+=9){
+    M5.Display.fillRect(0,y,240,9,rainbow565((hue+y/2)%192));
+  }
+  M5.Display.fillRect(0,0,240,135,M5.Display.color565(4,5,14));
+  for(int i=0;i<5;i++){
+    int x=(int)((millis()/28+i*53)%280)-20;
+    int y=18+i*25;
+    M5.Display.fillCircle(x,y,10+i*2,rainbow565((hue+i*31)%192));
+  }
+  M5.Display.fillRect(0,0,240,135,M5.Display.color565(5,6,16));
+}
+
+void title(const String& right=""){
+  M5.Display.setTextDatum(top_left);
+  M5.Display.setTextColor(TFT_CYAN);
   M5.Display.setTextSize(2);
-  M5.Display.setCursor(8, 8);
-  M5.Display.print("WLED REMOTE");
-  M5.Display.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  M5.Display.drawString("WLED REMOTE",7,5);
   M5.Display.setTextSize(1);
-  M5.Display.setCursor(9, 30);
-  M5.Display.print(subtitle);
+  M5.Display.setTextColor(TFT_LIGHTGREY);
+  if(right.length()) M5.Display.drawRightString(right,233,9);
 }
 
-void drawStatus(const String& message) {
-  drawHeader(WLED_REMOTE_VERSION);
-  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(10, 70);
-  M5.Display.println(message);
-}
-
-bool queryDevice(WledDevice& d) {
-  HTTPClient http;
-  http.setTimeout(1200);
-  String url = "http://" + d.ip.toString() + "/json";
-  if (!http.begin(url)) return false;
-  int code = http.GET();
-  if (code != 200) { http.end(); return false; }
-
+bool queryDevice(WledDevice& d){
+  HTTPClient http; http.setTimeout(1000);
+  if(!http.begin("http://"+d.ip.toString()+"/json")) return false;
+  int code=http.GET();
+  if(code!=200){http.end();d.online=false;return false;}
   JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, http.getStream());
-  http.end();
-  if (err) return false;
-
-  d.name = doc["info"]["name"] | d.name;
-  d.on = doc["state"]["on"] | false;
-  d.brightness = doc["state"]["bri"] | 0;
-  d.online = true;
-  return true;
+  auto err=deserializeJson(doc,http.getStream()); http.end();
+  if(err){d.online=false;return false;}
+  d.name=doc["info"]["name"]|d.name;
+  d.on=doc["state"]["on"]|false;
+  d.brightness=doc["state"]["bri"]|0;
+  bool nl=doc["state"]["nl"]["on"]|false;
+  d.timerMinutes=nl ? (int)(doc["state"]["nl"]["rem"]|0) : 0;
+  d.online=true; return true;
 }
 
-bool sendState(WledDevice& d, const String& json) {
-  HTTPClient http;
-  http.setTimeout(1500);
-  if (!http.begin("http://" + d.ip.toString() + "/json/state")) return false;
-  http.addHeader("Content-Type", "application/json");
-  int code = http.POST(json);
-  http.end();
-  if (code < 200 || code >= 300) return false;
-  delay(80);
-  return queryDevice(d);
+bool sendState(WledDevice& d,const String& json){
+  HTTPClient http; http.setTimeout(1400);
+  if(!http.begin("http://"+d.ip.toString()+"/json/state")) return false;
+  http.addHeader("Content-Type","application/json");
+  int code=http.POST(json); http.end();
+  if(code<200||code>=300) return false;
+  delay(60); return queryDevice(d);
 }
-
-void toggleDevice(WledDevice& d) {
-  sendState(d, d.on ? "{\"on\":false}" : "{\"on\":true}");
+void toggle(WledDevice& d){sendState(d,d.on?"{\"on\":false}":"{\"on\":true}");}
+void white(WledDevice& d){sendState(d,"{\"on\":true,\"seg\":[{\"fx\":0,\"col\":[[255,255,255]]}]}");}
+void defaults(WledDevice& d){sendState(d,"{\"on\":true,\"ps\":1}");}
+void brightness(WledDevice& d,int delta){
+  int b=constrain((int)d.brightness+delta,5,255);
+  sendState(d,"{\"on\":true,\"bri\":"+String(b)+"}");
 }
-
-void setWhite(WledDevice& d) {
-  sendState(d, "{\"on\":true,\"seg\":[{\"col\":[[255,255,255]]}]}");
+void timer(WledDevice& d,int mins){
+  if(mins==0) sendState(d,"{\"nl\":{\"on\":false}}");
+  else sendState(d,"{\"on\":true,\"nl\":{\"on\":true,\"dur\":"+String(mins)+",\"mode\":0,\"tbri\":0}}");
 }
+template<typename F> void all(F fn){for(size_t i=0;i<deviceCount;i++) if(devices[i].online) fn(devices[i]);}
 
-void restoreDefault(WledDevice& d) {
-  sendState(d, "{\"on\":true,\"ps\":1}");
-}
-
-void setSleepTimer(WledDevice& d, uint16_t minutes) {
-  String payload = "{\"on\":true,\"nl\":{\"on\":true,\"dur\":" + String(minutes) +
-                   ",\"mode\":0,\"tbri\":0}}";
-  sendState(d, payload);
-}
-
-void discoverWled() {
-  deviceCount = 0;
-  drawStatus("DISCOVERING...");
-  int n = MDNS.queryService("wled", "tcp");
-  for (int i = 0; i < n && deviceCount < MAX_DEVICES; ++i) {
-    IPAddress ip = MDNS.IP(i);
-    bool duplicate = false;
-    for (size_t j = 0; j < deviceCount; ++j) {
-      if (devices[j].ip == ip) duplicate = true;
-    }
-    if (duplicate) continue;
-
-    WledDevice d;
-    d.ip = ip;
-    d.name = MDNS.hostname(i);
-    if (queryDevice(d)) devices[deviceCount++] = d;
+void discover(){
+  deviceCount=0;
+  int n=MDNS.queryService("wled","tcp");
+  for(int i=0;i<n && deviceCount<MAX_DEVICES;i++){
+    IPAddress ip=MDNS.IP(i); bool dup=false;
+    for(size_t j=0;j<deviceCount;j++) if(devices[j].ip==ip) dup=true;
+    if(dup) continue;
+    WledDevice d; d.ip=ip; d.name=MDNS.hostname(i);
+    if(queryDevice(d)) devices[deviceCount++]=d;
   }
+  if(selected>deviceCount) selected=0;
 }
 
-void drawDevices() {
-  drawHeader(WiFi.localIP().toString().c_str());
+void drawHome(){
+  backdrop(); title(WiFi.isConnected()?"WIFI":"OFFLINE");
   M5.Display.setTextSize(1);
-  if (!deviceCount) {
-    M5.Display.setTextColor(TFT_ORANGE, TFT_BLACK);
-    M5.Display.setCursor(10, 65);
-    M5.Display.println("NO WLED LIGHTS FOUND");
-    M5.Display.setCursor(10, 82);
-    M5.Display.println("B: RESCAN");
-    return;
+  M5.Display.setTextColor(selected==0?TFT_YELLOW:TFT_WHITE);
+  M5.Display.drawString(selected==0?"> ALL LIGHTS":"  ALL LIGHTS",8,30);
+  int visible=min((int)deviceCount,4);
+  for(int i=0;i<visible;i++){
+    int y=48+i*18; size_t idx=i+1;
+    String nm=devices[i].name; if(nm.length()>17) nm=nm.substring(0,17);
+    M5.Display.setTextColor(selected==idx?TFT_YELLOW:TFT_WHITE);
+    M5.Display.drawString(String(selected==idx?"> ":"  ")+nm,8,y);
+    M5.Display.setTextColor(devices[i].on?TFT_GREEN:TFT_DARKGREY);
+    M5.Display.drawRightString(devices[i].on?"ON":"OFF",231,y);
   }
-
-  for (size_t i = 0; i < deviceCount && i < 6; ++i) {
-    int y = 50 + (int)i * 20;
-    M5.Display.setTextColor(i == selected ? TFT_YELLOW : TFT_WHITE, TFT_BLACK);
-    M5.Display.setCursor(8, y);
-    M5.Display.print(i == selected ? "> " : "  ");
-    String name = devices[i].name;
-    if (name.length() > 14) name = name.substring(0, 14);
-    M5.Display.print(name);
-    M5.Display.setCursor(190, y);
-    M5.Display.setTextColor(devices[i].on ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
-    M5.Display.print(devices[i].on ? "ON" : "OFF");
-  }
-  M5.Display.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  M5.Display.setCursor(8, 125);
-  M5.Display.printf("A TOGGLE   B NEXT   %u FOUND", (unsigned)deviceCount);
+  M5.Display.setTextColor(TFT_LIGHTGREY);
+  M5.Display.drawString(deviceCount?String(deviceCount)+" LIGHTS  A OPEN  B NEXT":"NO LIGHTS - HOLD B RESCAN",8,123);
 }
 
-void connectSavedWifi() {
+void drawActionMenu(bool isAll){
+  backdrop(); title(isAll?"ALL LIGHTS":devices[selected-1].name);
+  for(int i=0;i<ACTION_COUNT;i++){
+    int y=30+i*14;
+    M5.Display.setTextColor(i==menuIndex?TFT_YELLOW:TFT_WHITE);
+    M5.Display.drawString(String(i==menuIndex?"> ":"  ")+actions[i],9,y);
+  }
+  M5.Display.setTextColor(TFT_LIGHTGREY);
+  M5.Display.drawString("A SELECT  B NEXT  HOLD B BACK",8,123);
+}
+
+void drawTimer(){
+  backdrop(); title("SLEEP");
+  for(int i=0;i<5;i++){
+    int y=35+i*17;
+    M5.Display.setTextColor(i==menuIndex?TFT_YELLOW:TFT_WHITE);
+    M5.Display.drawString(String(i==menuIndex?"> ":"  ")+timerLabels[i],18,y);
+  }
+}
+
+void render(){
+  if(screen==Screen::HOME) drawHome();
+  else if(screen==Screen::TIMER) drawTimer();
+  else drawActionMenu(screen==Screen::ALL);
+}
+
+void runAction(bool isAll){
+  auto one=[&](auto fn){if(isAll) all(fn); else fn(devices[selected-1]);};
+  switch(menuIndex){
+    case 0: one([](WledDevice& d){toggle(d);}); break;
+    case 1: one([](WledDevice& d){white(d);}); break;
+    case 2: one([](WledDevice& d){defaults(d);}); break;
+    case 3: one([](WledDevice& d){brightness(d,32);}); break;
+    case 4: one([](WledDevice& d){brightness(d,-32);}); break;
+    case 5: screen=Screen::TIMER; menuIndex=1; render(); return;
+    case 6: screen=Screen::HOME; menuIndex=0; render(); return;
+  }
+  render();
+}
+
+void wifiSetup(){
   WiFi.mode(WIFI_STA);
-  WiFi.begin();
-  drawStatus("CONNECTING...");
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 12000) {
-    delay(100);
-    M5.update();
-  }
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(180);
+  wm.setConnectTimeout(15);
+  M5.Display.fillScreen(TFT_BLACK);
+  title("SETUP");
+  M5.Display.setTextColor(TFT_WHITE); M5.Display.setTextSize(1);
+  M5.Display.drawString("Connect to:",10,45);
+  M5.Display.setTextColor(TFT_CYAN); M5.Display.setTextSize(2);
+  M5.Display.drawString("WLED-Remote-Setup",10,62);
+  M5.Display.setTextSize(1); M5.Display.setTextColor(TFT_LIGHTGREY);
+  M5.Display.drawString("Choose Wi-Fi in the setup portal",10,91);
+  wm.autoConnect("WLED-Remote-Setup");
 }
 
-void setup() {
-  auto cfg = M5.config();
-  M5.begin(cfg);
-  M5.Display.setRotation(1);
-  M5.Display.setBrightness(100);
-
-  connectSavedWifi();
-  if (WiFi.status() != WL_CONNECTED) {
-    drawStatus("WIFI SETUP NEXT");
-    // Captive-portal provisioning is the next implementation step.
-    return;
-  }
-
-  if (!MDNS.begin("wled-remote")) {
-    drawStatus("MDNS ERROR");
-    return;
-  }
-
-  discoverWled();
-  drawDevices();
+void setup(){
+  auto cfg=M5.config(); M5.begin(cfg);
+  M5.Display.setRotation(1); M5.Display.setBrightness(110);
+  wifiSetup();
+  if(WiFi.status()!=WL_CONNECTED){M5.Display.fillScreen(TFT_BLACK);title("NO WIFI");return;}
+  MDNS.begin("wled-remote");
+  discover(); render();
 }
 
-void loop() {
+void loop(){
   M5.update();
-  if (WiFi.status() != WL_CONNECTED) {
-    delay(20);
-    return;
+  if(WiFi.status()!=WL_CONNECTED){delay(30);return;}
+
+  if(M5.BtnB.wasHold()){
+    if(screen!=Screen::HOME){screen=Screen::HOME;menuIndex=0;}
+    else discover();
+    render(); delay(180); return;
   }
 
-  if (M5.BtnA.wasPressed() && deviceCount) {
-    toggleDevice(devices[selected]);
-    drawDevices();
+  if(M5.BtnB.wasPressed()){
+    if(screen==Screen::HOME) selected=(selected+1)%(deviceCount+1);
+    else if(screen==Screen::TIMER) menuIndex=(menuIndex+1)%5;
+    else menuIndex=(menuIndex+1)%ACTION_COUNT;
+    render();
   }
 
-  if (M5.BtnB.wasPressed()) {
-    if (deviceCount) selected = (selected + 1) % deviceCount;
-    else discoverWled();
-    drawDevices();
+  if(M5.BtnA.wasPressed()){
+    if(screen==Screen::HOME){
+      screen=(selected==0)?Screen::ALL:Screen::DEVICE; menuIndex=0;
+    } else if(screen==Screen::TIMER){
+      int mins=timers[menuIndex];
+      bool isAll=(selected==0);
+      if(isAll) all([&](WledDevice& d){timer(d,mins);});
+      else timer(devices[selected-1],mins);
+      screen=isAll?Screen::ALL:Screen::DEVICE; menuIndex=0;
+    } else runAction(screen==Screen::ALL);
+    render();
   }
 
-  if (millis() - lastRefresh > 10000) {
-    lastRefresh = millis();
-    for (size_t i = 0; i < deviceCount; ++i) queryDevice(devices[i]);
-    drawDevices();
+  if(screen==Screen::HOME && millis()-lastRefresh>10000){
+    lastRefresh=millis();
+    for(size_t i=0;i<deviceCount;i++) queryDevice(devices[i]);
+    render();
   }
+  if(millis()-animTick>350){animTick=millis();hue=(hue+5)%192;if(screen==Screen::HOME)render();}
   delay(15);
 }
