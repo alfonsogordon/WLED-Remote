@@ -14,17 +14,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
+
       - name: Install PlatformIO
         run: pip install platformio
-      - name: Build
+
+      - name: Build M5StickC Plus2 firmware
         run: pio run
-      - name: Collect firmware
+
+      - name: Prepare flash package
         run: |
           mkdir -p dist
-          cp .pio/build/m5stickcplus2/firmware.bin dist/firmware.bin
           cp .pio/build/m5stickcplus2/bootloader.bin dist/bootloader.bin
           cp .pio/build/m5stickcplus2/partitions.bin dist/partitions.bin
-      - uses: actions/upload-artifact@v4
+          cp .pio/build/m5stickcplus2/firmware.bin dist/firmware.bin
+          cp web-installer/manifest.json dist/manifest.json
+          python -m esptool --chip esp32 merge_bin -o dist/wled-remote-complete.bin             --flash_mode dio --flash_freq 40m --flash_size 4MB             0x1000 dist/bootloader.bin             0x8000 dist/partitions.bin             0x10000 dist/firmware.bin
+
+      - name: Upload flash package
+        uses: actions/upload-artifact@v4
         with:
           name: wled-remote-m5stickcplus2
           path: dist/
