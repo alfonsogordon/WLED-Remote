@@ -1,0 +1,40 @@
+name: Build web installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "web-installer/**"
+      - "src/**"
+      - "platformio.ini"
+      - ".github/workflows/pages.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Build firmware
+        run: pio run
+      - name: Assemble installer
+        run: |
+          mkdir -p site
+          cp web-installer/index.html site/index.html
+          cp web-installer/manifest.json site/manifest.json
+          cp .pio/build/m5stickcplus2/bootloader.bin site/bootloader.bin
+          cp .pio/build/m5stickcplus2/partitions.bin site/partitions.bin
+          cp .pio/build/m5stickcplus2/firmware.bin site/firmware.bin
+      - name: Upload installer site
+        uses: actions/upload-artifact@v4
+        with:
+          name: wled-remote-web-installer
+          path: site/
