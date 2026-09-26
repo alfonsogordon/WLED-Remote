@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>WLED Remote Installer</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#070914;color:#fff;font-family:system-ui,sans-serif}
+    main{width:min(520px,88vw);padding:34px;border:1px solid #29315e;border-radius:24px;background:linear-gradient(145deg,#11162d,#090b18);box-shadow:0 0 70px #5324a744}
+    h1{font-size:2.4rem;margin:.1em 0;background:linear-gradient(90deg,#56e8ff,#b568ff,#ff5fb7);color:transparent;background-clip:text}
+    p{color:#bdc5e5;line-height:1.6}
+    esp-web-install-button{display:block;margin-top:26px}
+  </style>
+</head>
+<body>
+<main>
+  <h1>WLED Remote</h1>
+  <p>Browser installer for M5StickC Plus2.</p>
+  <p>Connect the M5StickC Plus2 by USB, then install the latest compatible firmware.</p>
+  <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+</main>
+</body>
+</html>
