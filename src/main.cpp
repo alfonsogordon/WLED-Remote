@@ -1,8 +1,8 @@
 #include <Arduino.h>
-#include <HardwareSerial.h>
 #include <M5Unified.h>
 #include <WiFi.h>
-#include <WiFiManager.h>
+#include <WebServer.h>
+#include <DNSServer.h>
 #include <HTTPClient.h>
 #include <ESPmDNS.h>
 #include <ArduinoJson.h>
@@ -172,20 +172,75 @@ void runAction(bool isAll){
   render();
 }
 
+String wifiPage(const String& message=""){
+  String options;
+  int n=WiFi.scanNetworks();
+  for(int i=0;i<n;i++){
+    String ssid=WiFi.SSID(i);
+    ssid.replace("&","&amp;"); ssid.replace("<","&lt;"); ssid.replace(">","&gt;");
+    options += "<option value=\"" + ssid + "\">" + ssid + " (" + String(WiFi.RSSI(i)) + " dBm)</option>";
+  }
+  return "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+         "<title>WLED Remote Setup</title><style>body{font-family:system-ui;background:#080a18;color:#fff;margin:0;"
+         "min-height:100vh;display:grid;place-items:center}.c{width:min(420px,86vw);padding:28px;border-radius:22px;"
+         "background:#12172d}h1{color:#63eaff}select,input,button{box-sizing:border-box;width:100%;padding:14px;"
+         "margin:8px 0;border-radius:12px;border:1px solid #39436e;background:#090d20;color:#fff}button{background:"
+         "#663cff;font-weight:700}.m{color:#ffb95e}</style></head><body><div class='c'><h1>WLED Remote</h1>"
+         "<p>Choose the Wi-Fi network used by your WLED lamps.</p><p class='m'>" + message + "</p>"
+         "<form method='POST' action='/save'><select name='ssid'>" + options + "</select>"
+         "<input name='pass' type='password' placeholder='Wi-Fi password'><button>CONNECT</button></form>"
+         "</div></body></html>";
+}
+
 void wifiSetup(){
   WiFi.mode(WIFI_STA);
-  WiFiManager wm;
-  wm.setConfigPortalTimeout(180);
-  wm.setConnectTimeout(15);
-  M5.Display.fillScreen(TFT_BLACK);
-  title("SETUP");
+  WiFi.begin();
+  M5.Display.fillScreen(TFT_BLACK); title("WIFI");
   M5.Display.setTextColor(TFT_WHITE); M5.Display.setTextSize(1);
-  M5.Display.drawString("Connect to:",10,45);
+  M5.Display.drawString("Connecting to saved Wi-Fi...",10,55);
+  unsigned long start=millis();
+  while(WiFi.status()!=WL_CONNECTED && millis()-start<10000){delay(100);M5.update();}
+  if(WiFi.status()==WL_CONNECTED) return;
+
+  WiFi.disconnect();
+  delay(100);
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP("WLED-Remote-Setup");
+  IPAddress ap=WiFi.softAPIP();
+  DNSServer dns;
+  WebServer server(80);
+  dns.start(53,"*",ap);
+
+  bool finished=false;
+  server.on("/",HTTP_GET,[&](){server.send(200,"text/html",wifiPage());});
+  server.on("/generate_204",HTTP_GET,[&](){server.sendHeader("Location","/",true);server.send(302,"text/plain","");});
+  server.on("/hotspot-detect.html",HTTP_GET,[&](){server.sendHeader("Location","/",true);server.send(302,"text/plain","");});
+  server.onNotFound([&](){server.sendHeader("Location","/",true);server.send(302,"text/plain","");});
+  server.on("/save",HTTP_POST,[&](){
+    String ssid=server.arg("ssid"), pass=server.arg("pass");
+    server.send(200,"text/html","<html><body style='font-family:system-ui;background:#080a18;color:white'><h2>Connecting...</h2><p>You can return to WLED Remote.</p></body></html>");
+    delay(250);
+    WiFi.begin(ssid.c_str(),pass.c_str());
+    unsigned long t=millis();
+    while(WiFi.status()!=WL_CONNECTED && millis()-t<15000){delay(100);}
+    if(WiFi.status()==WL_CONNECTED) finished=true;
+  });
+  server.begin();
+
+  M5.Display.fillScreen(TFT_BLACK); title("SETUP");
+  M5.Display.setTextColor(TFT_WHITE); M5.Display.setTextSize(1);
+  M5.Display.drawString("On your phone connect to:",10,42);
   M5.Display.setTextColor(TFT_CYAN); M5.Display.setTextSize(2);
-  M5.Display.drawString("WLED-Remote-Setup",10,62);
+  M5.Display.drawString("WLED-Remote-Setup",10,59);
   M5.Display.setTextSize(1); M5.Display.setTextColor(TFT_LIGHTGREY);
-  M5.Display.drawString("Choose Wi-Fi in the setup portal",10,91);
-  wm.autoConnect("WLED-Remote-Setup");
+  M5.Display.drawString("Setup page should open automatically",10,88);
+  M5.Display.drawString("or browse to 192.168.4.1",10,103);
+
+  while(!finished){
+    dns.processNextRequest(); server.handleClient(); M5.update(); delay(2);
+  }
+  server.stop(); dns.stop(); WiFi.softAPdisconnect(true); WiFi.mode(WIFI_STA);
+  delay(250);
 }
 
 void setup(){
