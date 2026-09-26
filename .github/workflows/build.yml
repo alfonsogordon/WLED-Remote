@@ -16,7 +16,7 @@ jobs:
           python-version: "3.x"
 
       - name: Install PlatformIO
-        run: pip install platformio
+        run: pip install platformio esptool
 
       - name: Build M5StickC Plus2 firmware
         run: pio run
