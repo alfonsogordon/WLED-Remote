@@ -1,0 +1,30 @@
+name: Build firmware
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Build
+        run: pio run
+      - name: Collect firmware
+        run: |
+          mkdir -p dist
+          cp .pio/build/m5stickcplus2/firmware.bin dist/firmware.bin
+          cp .pio/build/m5stickcplus2/bootloader.bin dist/bootloader.bin
+          cp .pio/build/m5stickcplus2/partitions.bin dist/partitions.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wled-remote-m5stickcplus2
+          path: dist/
