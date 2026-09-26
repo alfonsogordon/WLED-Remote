@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <HardwareSerial.h>
 #include <M5Unified.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
