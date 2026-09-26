@@ -19,16 +19,20 @@ struct WledDevice {
   int timerMinutes=0;
 };
 
-enum class Screen { HOME, DEVICE, TIMER, ALL };
+enum class Screen { HOME, DEVICE, TIMER, PRESETS, ALL };
 static constexpr size_t MAX_DEVICES=16;
 WledDevice devices[MAX_DEVICES];
 size_t deviceCount=0, selected=0;
 int menuIndex=0;
 Screen screen=Screen::HOME;
+static constexpr int MAX_PRESETS=32;
+struct PresetEntry { int id=0; String name; };
+PresetEntry presets[MAX_PRESETS];
+int presetCount=0, presetIndex=0;
 unsigned long lastRefresh=0;
 
-const char* actions[]={"POWER","WHITE","DEFAULT","BRIGHT +","BRIGHT -","SLEEP TIMER","BACK"};
-const int ACTION_COUNT=7;
+const char* actions[]={"POWER","WHITE","DEFAULT","PRESETS","BRIGHT +","BRIGHT -","SLEEP TIMER","BACK"};
+const int ACTION_COUNT=8;
 const int timers[]={30,60,120,180,0};
 const char* timerLabels[]={"30 MIN","1 HOUR","2 HOURS","3 HOURS","CANCEL"};
 
@@ -70,6 +74,33 @@ bool sendState(WledDevice& d,const String& json){
   if(code<200||code>=300) return false;
   delay(60); return queryDevice(d);
 }
+bool loadPresets(WledDevice& d){
+  presetCount=0; presetIndex=0;
+  HTTPClient http; http.setTimeout(2500);
+  if(!http.begin("http://"+d.ip.toString()+"/presets.json")) return false;
+  int code=http.GET();
+  if(code!=200){http.end();return false;}
+  JsonDocument doc;
+  auto err=deserializeJson(doc,http.getStream()); http.end();
+  if(err || !doc.is<JsonObject>()) return false;
+  JsonObject obj=doc.as<JsonObject>();
+  for(JsonPair kv:obj){
+    if(presetCount>=MAX_PRESETS) break;
+    int id=String(kv.key().c_str()).toInt();
+    if(id<=0) continue;
+    String name=kv.value()["n"] | "";
+    if(!name.length()) name="Preset "+String(id);
+    presets[presetCount].id=id;
+    presets[presetCount].name=name;
+    presetCount++;
+  }
+  return presetCount>0;
+}
+
+void applyPreset(WledDevice& d,int id){
+  sendState(d,"{\"on\":true,\"ps\":"+String(id)+"}");
+}
+
 void toggle(WledDevice& d){sendState(d,d.on?"{\"on\":false}":"{\"on\":true}");}
 void white(WledDevice& d){sendState(d,"{\"on\":true,\"seg\":[{\"fx\":0,\"col\":[[255,255,255]]}]}");}
 void defaults(WledDevice& d){sendState(d,"{\"on\":true,\"ps\":1}");}
@@ -151,6 +182,24 @@ void drawActionMenu(bool isAll){
   M5.Display.drawString("A SELECT  B NEXT  HOLD B BACK",8,123);
 }
 
+void drawPresets(){
+  backdrop();
+  if(selected==0){title("PRESETS");M5.Display.setTextColor(TFT_LIGHTGREY);M5.Display.drawString("Choose one lamp first",12,58);return;}
+  title(devices[selected-1].name);
+  M5.Display.setTextColor(TFT_CYAN); M5.Display.drawString("SAVED PRESETS",9,29);
+  if(!presetCount){M5.Display.setTextColor(TFT_LIGHTGREY);M5.Display.drawString("No presets found",12,58);return;}
+  int first=0; if(presetIndex>4) first=presetIndex-4;
+  int visible=min(presetCount-first,5);
+  for(int row=0;row<visible;row++){
+    int i=first+row, y=45+row*14;
+    String nm=presets[i].name; if(nm.length()>23) nm=nm.substring(0,23);
+    M5.Display.setTextColor(i==presetIndex?TFT_YELLOW:TFT_WHITE);
+    M5.Display.drawString(String(i==presetIndex?"> ":"  ")+nm,9,y);
+  }
+  M5.Display.setTextColor(TFT_LIGHTGREY);
+  M5.Display.drawString("A APPLY  B NEXT  HOLD B BACK",8,123);
+}
+
 void drawTimer(){
   backdrop(); title("SLEEP");
   for(int i=0;i<5;i++){
@@ -163,6 +212,7 @@ void drawTimer(){
 void render(){
   if(screen==Screen::HOME) drawHome();
   else if(screen==Screen::TIMER) drawTimer();
+  else if(screen==Screen::PRESETS) drawPresets();
   else drawActionMenu(screen==Screen::ALL);
 }
 
@@ -172,10 +222,16 @@ void runAction(bool isAll){
     case 0: one([](WledDevice& d){toggle(d);}); break;
     case 1: one([](WledDevice& d){white(d);}); break;
     case 2: one([](WledDevice& d){defaults(d);}); break;
-    case 3: one([](WledDevice& d){brightness(d,32);}); break;
-    case 4: one([](WledDevice& d){brightness(d,-32);}); break;
-    case 5: screen=Screen::TIMER; menuIndex=1; render(); return;
-    case 6: screen=Screen::HOME; menuIndex=0; render(); return;
+    case 3:
+      if(!isAll){
+        loadPresets(devices[selected-1]);
+        screen=Screen::PRESETS; presetIndex=0; render(); return;
+      }
+      break;
+    case 4: one([](WledDevice& d){brightness(d,32);}); break;
+    case 5: one([](WledDevice& d){brightness(d,-32);}); break;
+    case 6: screen=Screen::TIMER; menuIndex=1; render(); return;
+    case 7: screen=Screen::HOME; menuIndex=0; render(); return;
   }
   render();
 }
@@ -273,6 +329,7 @@ void loop(){
   if(M5.BtnB.wasPressed()){
     if(screen==Screen::HOME) selected=(selected+1)%(deviceCount+1);
     else if(screen==Screen::TIMER) menuIndex=(menuIndex+1)%5;
+    else if(screen==Screen::PRESETS){if(presetCount)presetIndex=(presetIndex+1)%presetCount;}
     else menuIndex=(menuIndex+1)%ACTION_COUNT;
     render();
   }
@@ -280,6 +337,8 @@ void loop(){
   if(M5.BtnA.wasPressed()){
     if(screen==Screen::HOME){
       screen=(selected==0)?Screen::ALL:Screen::DEVICE; menuIndex=0;
+    } else if(screen==Screen::PRESETS){
+      if(presetCount && selected>0) applyPreset(devices[selected-1],presets[presetIndex].id);
     } else if(screen==Screen::TIMER){
       int mins=timers[menuIndex];
       bool isAll=(selected==0);
