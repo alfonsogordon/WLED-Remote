@@ -25,33 +25,15 @@ WledDevice devices[MAX_DEVICES];
 size_t deviceCount=0, selected=0;
 int menuIndex=0;
 Screen screen=Screen::HOME;
-unsigned long lastRefresh=0, animTick=0;
-uint16_t hue=0;
+unsigned long lastRefresh=0;
 
 const char* actions[]={"POWER","WHITE","DEFAULT","BRIGHT +","BRIGHT -","SLEEP TIMER","BACK"};
 const int ACTION_COUNT=7;
 const int timers[]={30,60,120,180,0};
 const char* timerLabels[]={"30 MIN","1 HOUR","2 HOURS","3 HOURS","CANCEL"};
 
-uint16_t rainbow565(uint8_t phase){
-  uint8_t r=0,g=0,b=0, p=phase%192;
-  if(p<64){r=255-p*4;g=p*4;b=40;}
-  else if(p<128){p-=64;r=30;g=255-p*4;b=p*4;}
-  else {p-=128;r=p*4;g=30;b=255-p*4;}
-  return M5.Display.color565(r,g,b);
-}
-
 void backdrop(){
-  for(int y=0;y<135;y+=9){
-    M5.Display.fillRect(0,y,240,9,rainbow565((hue+y/2)%192));
-  }
-  M5.Display.fillRect(0,0,240,135,M5.Display.color565(4,5,14));
-  for(int i=0;i<5;i++){
-    int x=(int)((millis()/28+i*53)%280)-20;
-    int y=18+i*25;
-    M5.Display.fillCircle(x,y,10+i*2,rainbow565((hue+i*31)%192));
-  }
-  M5.Display.fillRect(0,0,240,135,M5.Display.color565(5,6,16));
+  M5.Display.fillScreen(M5.Display.color565(5,6,16));
 }
 
 void title(const String& right=""){
@@ -101,15 +83,38 @@ void timer(WledDevice& d,int mins){
 }
 template<typename F> void all(F fn){for(size_t i=0;i<deviceCount;i++) if(devices[i].online) fn(devices[i]);}
 
+bool addCandidate(IPAddress ip,const String& fallbackName="WLED"){
+  if(deviceCount>=MAX_DEVICES || !ip || ip==WiFi.localIP()) return false;
+  for(size_t j=0;j<deviceCount;j++) if(devices[j].ip==ip) return false;
+  WledDevice d; d.ip=ip; d.name=fallbackName;
+  if(queryDevice(d)){devices[deviceCount++]=d; return true;}
+  return false;
+}
+
 void discover(){
   deviceCount=0;
+
+  // Fast path: standard WLED mDNS advertisement.
   int n=MDNS.queryService("wled","tcp");
-  for(int i=0;i<n && deviceCount<MAX_DEVICES;i++){
-    IPAddress ip=MDNS.IP(i); bool dup=false;
-    for(size_t j=0;j<deviceCount;j++) if(devices[j].ip==ip) dup=true;
-    if(dup) continue;
-    WledDevice d; d.ip=ip; d.name=MDNS.hostname(i);
-    if(queryDevice(d)) devices[deviceCount++]=d;
+  for(int i=0;i<n && deviceCount<MAX_DEVICES;i++)
+    addCandidate(MDNS.IP(i),MDNS.hostname(i));
+
+  // Fallback: probe the local /24 for WLED JSON endpoints. This catches
+  // devices that do not appear in the ESP32 mDNS service query.
+  IPAddress local=WiFi.localIP(), mask=WiFi.subnetMask();
+  if(mask[0]==255 && mask[1]==255 && mask[2]==255 && mask[3]==0){
+    M5.Display.fillScreen(M5.Display.color565(5,6,16)); title("SCAN");
+    M5.Display.setTextColor(TFT_WHITE); M5.Display.setTextSize(1);
+    M5.Display.drawString("Finding all WLED lights...",10,54);
+    for(int host=1;host<255 && deviceCount<MAX_DEVICES;host++){
+      IPAddress ip(local[0],local[1],local[2],host);
+      addCandidate(ip);
+      if((host%16)==0){
+        M5.Display.fillRect(10,80,220,12,M5.Display.color565(5,6,16));
+        M5.Display.drawString(String(host)+"/254   "+String(deviceCount)+" found",10,80);
+      }
+      M5.update();
+    }
   }
   if(selected>deviceCount) selected=0;
 }
@@ -119,9 +124,12 @@ void drawHome(){
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(selected==0?TFT_YELLOW:TFT_WHITE);
   M5.Display.drawString(selected==0?"> ALL LIGHTS":"  ALL LIGHTS",8,30);
-  int visible=min((int)deviceCount,4);
-  for(int i=0;i<visible;i++){
-    int y=48+i*18; size_t idx=i+1;
+  int first=0;
+  if(selected>4) first=(int)selected-4;
+  int visible=min((int)deviceCount-first,4);
+  for(int row=0;row<visible;row++){
+    int i=first+row;
+    int y=48+row*18; size_t idx=i+1;
     String nm=devices[i].name; if(nm.length()>17) nm=nm.substring(0,17);
     M5.Display.setTextColor(selected==idx?TFT_YELLOW:TFT_WHITE);
     M5.Display.drawString(String(selected==idx?"> ":"  ")+nm,8,y);
@@ -287,6 +295,5 @@ void loop(){
     for(size_t i=0;i<deviceCount;i++) queryDevice(devices[i]);
     render();
   }
-  if(millis()-animTick>350){animTick=millis();hue=(hue+5)%192;if(screen==Screen::HOME)render();}
   delay(15);
 }
