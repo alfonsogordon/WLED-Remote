@@ -6,6 +6,7 @@
 #include <HTTPClient.h>
 #include <ESPmDNS.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 
 #ifndef WLED_REMOTE_VERSION
 #define WLED_REMOTE_VERSION "dev"
@@ -32,6 +33,7 @@ struct PresetEntry { int id=0; String name; };
 PresetEntry presets[MAX_PRESETS];
 int presetCount=0, presetIndex=0;
 unsigned long lastRefresh=0;
+Preferences prefs;
 bool multiSelected[MAX_DEVICES]={false};
 int multiCursor=0;
 const int whiteTimers[]={10,15,30,60};
@@ -171,8 +173,35 @@ bool addCandidate(IPAddress ip,const String& fallbackName="WLED"){
   return false;
 }
 
+void saveDeviceCache(){
+  JsonDocument doc;
+  JsonArray arr=doc.to<JsonArray>();
+  for(size_t i=0;i<deviceCount;i++){
+    JsonObject o=arr.add<JsonObject>();
+    o["name"]=devices[i].name;
+    o["ip"]=devices[i].ip.toString();
+  }
+  String out; serializeJson(doc,out);
+  prefs.begin("wledremote",false); prefs.putString("devices",out); prefs.end();
+}
+
+void loadDeviceCache(){
+  prefs.begin("wledremote",true); String raw=prefs.getString("devices",""); prefs.end();
+  if(!raw.length()) return;
+  JsonDocument doc; if(deserializeJson(doc,raw)) return;
+  for(JsonObject o:doc.as<JsonArray>()){
+    if(deviceCount>=MAX_DEVICES) break;
+    IPAddress ip; if(!ip.fromString(String((const char*)o["ip"]))) continue;
+    String name=o["name"] | "WLED";
+    addCandidate(ip,name);
+  }
+}
+
 void discover(){
   deviceCount=0;
+  // Start with devices we have successfully seen before. This makes discovery
+  // resilient to intermittent mDNS responses.
+  loadDeviceCache();
 
   // Fast path: standard WLED mDNS advertisement.
   int n=MDNS.queryService("wled","tcp");
@@ -199,6 +228,7 @@ void discover(){
     }
   }
   if(selected>deviceCount) selected=0;
+  if(deviceCount) saveDeviceCache();
 }
 
 void drawHome(){
