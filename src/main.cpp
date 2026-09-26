@@ -143,6 +143,26 @@ template<typename F> void chosen(F fn){
 }
 int chosenCount(){int n=0;for(size_t i=0;i<deviceCount;i++)if(multiSelected[i])n++;return n;}
 
+bool probeCandidate(IPAddress ip,const String& fallbackName="WLED",uint16_t timeoutMs=120){
+  if(deviceCount>=MAX_DEVICES || !ip || ip==WiFi.localIP()) return false;
+  for(size_t j=0;j<deviceCount;j++) if(devices[j].ip==ip) return false;
+  WiFiClient client;
+  if(!client.connect(ip,80,timeoutMs)) return false;
+  client.print("GET /json HTTP/1.0\r\nHost: "+ip.toString()+"\r\nConnection: close\r\n\r\n");
+  unsigned long until=millis()+timeoutMs;
+  String head;
+  while((long)(until-millis())>0 && head.length()<96){
+    while(client.available() && head.length()<96) head+=(char)client.read();
+    if(head.indexOf("200 OK")>=0) break;
+    delay(1);
+  }
+  client.stop();
+  if(head.indexOf("200 OK")<0) return false;
+  WledDevice d; d.ip=ip; d.name=fallbackName;
+  if(queryDevice(d)){devices[deviceCount++]=d; return true;}
+  return false;
+}
+
 bool addCandidate(IPAddress ip,const String& fallbackName="WLED"){
   if(deviceCount>=MAX_DEVICES || !ip || ip==WiFi.localIP()) return false;
   for(size_t j=0;j<deviceCount;j++) if(devices[j].ip==ip) return false;
@@ -166,14 +186,16 @@ void discover(){
     M5.Display.fillScreen(M5.Display.color565(5,6,16)); title("SCAN");
     M5.Display.setTextColor(TFT_WHITE); M5.Display.setTextSize(1);
     M5.Display.drawString("Finding all WLED lights...",10,54);
+    // Keep fallback bounded: TCP pre-probe uses a very short timeout, then
+    // only confirmed HTTP servers pay the full WLED JSON request cost.
     for(int host=1;host<255 && deviceCount<MAX_DEVICES;host++){
       IPAddress ip(local[0],local[1],local[2],host);
-      addCandidate(ip);
-      if((host%16)==0){
+      probeCandidate(ip,"WLED",45);
+      if((host%32)==0){
         M5.Display.fillRect(10,80,220,12,M5.Display.color565(5,6,16));
         M5.Display.drawString(String(host)+"/254   "+String(deviceCount)+" found",10,80);
+        M5.update();
       }
-      M5.update();
     }
   }
   if(selected>deviceCount) selected=0;
