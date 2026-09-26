@@ -17,9 +17,11 @@ struct WledDevice {
   bool online=false, on=false;
   uint8_t brightness=0;
   int timerMinutes=0;
+  String savedState;
+  unsigned long whiteRestoreAt=0;
 };
 
-enum class Screen { HOME, DEVICE, TIMER, PRESETS, ALL };
+enum class Screen { HOME, DEVICE, TIMER, WHITE_TIMER, PRESETS, MULTI, ALL };
 static constexpr size_t MAX_DEVICES=16;
 WledDevice devices[MAX_DEVICES];
 size_t deviceCount=0, selected=0;
@@ -30,9 +32,13 @@ struct PresetEntry { int id=0; String name; };
 PresetEntry presets[MAX_PRESETS];
 int presetCount=0, presetIndex=0;
 unsigned long lastRefresh=0;
+bool multiSelected[MAX_DEVICES]={false};
+int multiCursor=0;
+const int whiteTimers[]={10,15,30,60};
+const char* whiteTimerLabels[]={"10 MIN","15 MIN","30 MIN","1 HOUR"};
 
-const char* actions[]={"POWER","WHITE","DEFAULT","PRESETS","BRIGHT +","BRIGHT -","SLEEP TIMER","BACK"};
-const int ACTION_COUNT=8;
+const char* actions[]={"POWER","WHITE","WHITE TIMER","DEFAULT","PRESETS","BRIGHT +","BRIGHT -","SLEEP TIMER","BACK"};
+const int ACTION_COUNT=9;
 const int timers[]={30,60,120,180,0};
 const char* timerLabels[]={"30 MIN","1 HOUR","2 HOURS","3 HOURS","CANCEL"};
 
@@ -103,6 +109,25 @@ void applyPreset(WledDevice& d,int id){
 
 void toggle(WledDevice& d){sendState(d,d.on?"{\"on\":false}":"{\"on\":true}");}
 void white(WledDevice& d){sendState(d,"{\"on\":true,\"seg\":[{\"fx\":0,\"col\":[[255,255,255]]}]}");}
+bool captureState(WledDevice& d){
+  HTTPClient http; http.setTimeout(1500);
+  if(!http.begin("http://"+d.ip.toString()+"/json/state")) return false;
+  int code=http.GET(); if(code!=200){http.end();return false;}
+  d.savedState=http.getString(); http.end(); return d.savedState.length()>2;
+}
+void temporaryWhite(WledDevice& d,int mins){
+  if(captureState(d)){d.whiteRestoreAt=millis()+(unsigned long)mins*60000UL; white(d);}
+}
+void serviceWhiteTimers(){
+  unsigned long now=millis();
+  for(size_t i=0;i<deviceCount;i++){
+    if(devices[i].whiteRestoreAt && (long)(now-devices[i].whiteRestoreAt)>=0){
+      String restore=devices[i].savedState;
+      devices[i].whiteRestoreAt=0; devices[i].savedState="";
+      if(restore.length()) sendState(devices[i],restore);
+    }
+  }
+}
 void defaults(WledDevice& d){sendState(d,"{\"on\":true,\"ps\":1}");}
 void brightness(WledDevice& d,int delta){
   int b=constrain((int)d.brightness+delta,5,255);
@@ -113,6 +138,10 @@ void timer(WledDevice& d,int mins){
   else sendState(d,"{\"on\":true,\"nl\":{\"on\":true,\"dur\":"+String(mins)+",\"mode\":0,\"tbri\":0}}");
 }
 template<typename F> void all(F fn){for(size_t i=0;i<deviceCount;i++) if(devices[i].online) fn(devices[i]);}
+template<typename F> void chosen(F fn){
+  for(size_t i=0;i<deviceCount;i++) if(multiSelected[i] && devices[i].online) fn(devices[i]);
+}
+int chosenCount(){int n=0;for(size_t i=0;i<deviceCount;i++)if(multiSelected[i])n++;return n;}
 
 bool addCandidate(IPAddress ip,const String& fallbackName="WLED"){
   if(deviceCount>=MAX_DEVICES || !ip || ip==WiFi.localIP()) return false;
@@ -168,7 +197,8 @@ void drawHome(){
     M5.Display.drawRightString(devices[i].on?"ON":"OFF",231,y);
   }
   M5.Display.setTextColor(TFT_LIGHTGREY);
-  M5.Display.drawString(deviceCount?String(deviceCount)+" LIGHTS  A OPEN  B NEXT":"NO LIGHTS - HOLD B RESCAN",8,123);
+  M5.Display.drawString(deviceCount?String(deviceCount)+" LIGHTS  A OPEN  B NEXT":"NO LIGHTS - HOLD B RESCAN",8,116);
+  if(deviceCount){M5.Display.setTextColor(TFT_CYAN);M5.Display.drawString("HOLD A: MULTI SELECT",8,126);}
 }
 
 void drawActionMenu(bool isAll){
@@ -180,6 +210,27 @@ void drawActionMenu(bool isAll){
   }
   M5.Display.setTextColor(TFT_LIGHTGREY);
   M5.Display.drawString("A SELECT  B NEXT  HOLD B BACK",8,123);
+}
+
+void drawMulti(){
+  backdrop(); title("MULTI");
+  M5.Display.setTextColor(TFT_CYAN); M5.Display.drawString(String(chosenCount())+" SELECTED",9,29);
+  int first=0; if(multiCursor>4) first=multiCursor-4;
+  int visible=min((int)deviceCount-first,5);
+  for(int row=0;row<visible;row++){
+    int i=first+row,y=45+row*14;
+    String nm=devices[i].name;if(nm.length()>18)nm=nm.substring(0,18);
+    M5.Display.setTextColor(i==multiCursor?TFT_YELLOW:TFT_WHITE);
+    M5.Display.drawString(String(i==multiCursor?"> ":"  ")+(multiSelected[i]?"[x] ":"[ ] ")+nm,9,y);
+  }
+  M5.Display.setTextColor(TFT_LIGHTGREY);M5.Display.drawString("A TICK  B NEXT  HOLD A ACTIONS",8,123);
+}
+void drawWhiteTimer(){
+  backdrop(); title("WHITE TIMER");
+  for(int i=0;i<4;i++){
+    int y=40+i*18;M5.Display.setTextColor(i==menuIndex?TFT_YELLOW:TFT_WHITE);
+    M5.Display.drawString(String(i==menuIndex?"> ":"  ")+whiteTimerLabels[i],18,y);
+  }
 }
 
 void drawPresets(){
@@ -212,26 +263,27 @@ void drawTimer(){
 void render(){
   if(screen==Screen::HOME) drawHome();
   else if(screen==Screen::TIMER) drawTimer();
+  else if(screen==Screen::WHITE_TIMER) drawWhiteTimer();
+  else if(screen==Screen::MULTI) drawMulti();
   else if(screen==Screen::PRESETS) drawPresets();
   else drawActionMenu(screen==Screen::ALL);
 }
 
 void runAction(bool isAll){
-  auto one=[&](auto fn){if(isAll) all(fn); else fn(devices[selected-1]);};
+  bool isMulti=(screen==Screen::MULTI);
+  auto one=[&](auto fn){if(isMulti) chosen(fn); else if(isAll) all(fn); else fn(devices[selected-1]);};
   switch(menuIndex){
     case 0: one([](WledDevice& d){toggle(d);}); break;
     case 1: one([](WledDevice& d){white(d);}); break;
-    case 2: one([](WledDevice& d){defaults(d);}); break;
-    case 3:
-      if(!isAll){
-        loadPresets(devices[selected-1]);
-        screen=Screen::PRESETS; presetIndex=0; render(); return;
-      }
+    case 2: screen=Screen::WHITE_TIMER; menuIndex=1; render(); return;
+    case 3: one([](WledDevice& d){defaults(d);}); break;
+    case 4:
+      if(!isAll && !isMulti){loadPresets(devices[selected-1]);screen=Screen::PRESETS;presetIndex=0;render();return;}
       break;
-    case 4: one([](WledDevice& d){brightness(d,32);}); break;
-    case 5: one([](WledDevice& d){brightness(d,-32);}); break;
-    case 6: screen=Screen::TIMER; menuIndex=1; render(); return;
-    case 7: screen=Screen::HOME; menuIndex=0; render(); return;
+    case 5: one([](WledDevice& d){brightness(d,32);}); break;
+    case 6: one([](WledDevice& d){brightness(d,-32);}); break;
+    case 7: screen=Screen::TIMER; menuIndex=1; render(); return;
+    case 8: screen=Screen::HOME; menuIndex=0; render(); return;
   }
   render();
 }
@@ -320,6 +372,15 @@ void loop(){
   M5.update();
   if(WiFi.status()!=WL_CONNECTED){delay(30);return;}
 
+  serviceWhiteTimers();
+
+  if(M5.BtnA.wasHold() && screen==Screen::HOME && deviceCount){
+    screen=Screen::MULTI;multiCursor=0;menuIndex=0;render();delay(180);return;
+  }
+  if(M5.BtnA.wasHold() && screen==Screen::MULTI && chosenCount()>0){
+    menuIndex=0;render();delay(180);return;
+  }
+
   if(M5.BtnB.wasHold()){
     if(screen!=Screen::HOME){screen=Screen::HOME;menuIndex=0;}
     else discover();
@@ -329,6 +390,8 @@ void loop(){
   if(M5.BtnB.wasPressed()){
     if(screen==Screen::HOME) selected=(selected+1)%(deviceCount+1);
     else if(screen==Screen::TIMER) menuIndex=(menuIndex+1)%5;
+    else if(screen==Screen::WHITE_TIMER) menuIndex=(menuIndex+1)%4;
+    else if(screen==Screen::MULTI) multiCursor=(multiCursor+1)%deviceCount;
     else if(screen==Screen::PRESETS){if(presetCount)presetIndex=(presetIndex+1)%presetCount;}
     else menuIndex=(menuIndex+1)%ACTION_COUNT;
     render();
@@ -337,6 +400,13 @@ void loop(){
   if(M5.BtnA.wasPressed()){
     if(screen==Screen::HOME){
       screen=(selected==0)?Screen::ALL:Screen::DEVICE; menuIndex=0;
+    } else if(screen==Screen::MULTI){
+      multiSelected[multiCursor]=!multiSelected[multiCursor];
+    } else if(screen==Screen::WHITE_TIMER){
+      int mins=whiteTimers[menuIndex];
+      if(selected==0) all([&](WledDevice& d){temporaryWhite(d,mins);});
+      else temporaryWhite(devices[selected-1],mins);
+      screen=(selected==0)?Screen::ALL:Screen::DEVICE;menuIndex=0;
     } else if(screen==Screen::PRESETS){
       if(presetCount && selected>0) applyPreset(devices[selected-1],presets[presetIndex].id);
     } else if(screen==Screen::TIMER){
